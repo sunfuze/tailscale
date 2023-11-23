@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { apiFetch, setUnraidCsrfToken } from "src/api"
+import { ExitNode } from "src/hooks/exit-nodes"
+import { VersionInfo } from "src/hooks/self-update"
 
 export type NodeData = {
   Profile: UserProfile
@@ -20,12 +22,14 @@ export type NodeData = {
   IsUnraid: boolean
   UnraidToken: string
   IPNVersion: string
+  ClientVersion?: VersionInfo
   URLPrefix: string
+  DomainName: string
   TailnetName: string
   IsTagged: boolean
   Tags: string[]
-
-  DebugMode: "" | "login" | "full" // empty when not running in any debug mode
+  RunningSSHServer: boolean
+  ExitNodeStatus?: ExitNode & { Online: boolean }
 }
 
 type NodeState =
@@ -45,8 +49,13 @@ export type UserProfile = {
 export type NodeUpdate = {
   AdvertiseRoutes?: string
   AdvertiseExitNode?: boolean
-  Reauthenticate?: boolean
-  ForceLogout?: boolean
+}
+
+export type PrefsUpdate = {
+  RunSSHSet?: boolean
+  RunSSH?: boolean
+  ExitNodeIDSet?: boolean
+  ExitNodeID?: string
 }
 
 // useNodeData returns basic data about the current node.
@@ -100,18 +109,45 @@ export default function useNodeData() {
           if (err) {
             throw new Error(err)
           }
-          const url = r["url"]
-          if (url) {
-            window.open(url, "_blank")
-          }
           refreshData()
         })
         .catch((err) => {
+          setIsPosting(false)
           alert("Failed operation: " + err.message)
           throw err
         })
     },
     [data]
+  )
+
+  const updatePrefs = useCallback(
+    (p: PrefsUpdate) => {
+      setIsPosting(true)
+      if (data) {
+        const optimisticUpdates = data
+        if (p.RunSSHSet) {
+          optimisticUpdates.RunningSSHServer = Boolean(p.RunSSH)
+        }
+        // Reflect the pref change immediatley on the frontend,
+        // then make the prefs PATCH. If the request fails,
+        // data will be updated to it's previous value in
+        // onComplete below.
+        setData(optimisticUpdates)
+      }
+
+      const onComplete = () => {
+        setIsPosting(false)
+        refreshData() // refresh data after PATCH finishes
+      }
+
+      return apiFetch("/local/v0/prefs", "PATCH", p)
+        .then(onComplete)
+        .catch(() => {
+          onComplete()
+          alert("Failed to update prefs")
+        })
+    },
+    [setIsPosting, refreshData, setData, data]
   )
 
   useEffect(
@@ -133,5 +169,5 @@ export default function useNodeData() {
     []
   )
 
-  return { data, refreshData, updateNode, isPosting }
+  return { data, refreshData, updateNode, updatePrefs, isPosting }
 }

@@ -116,11 +116,6 @@ func newUpFlagSet(goos string, upArgs *upArgsT, cmd string) *flag.FlagSet {
 	upf.BoolVar(&upArgs.advertiseConnector, "advertise-connector", false, "advertise this node as an app connector")
 	upf.BoolVar(&upArgs.advertiseDefaultRoute, "advertise-exit-node", false, "offer to be an exit node for internet traffic for the tailnet")
 
-	// TODO(tailscale/corp#14335): during development only expose -webclient on dev and unstable builds
-	if version.GetMeta().IsDev || version.IsUnstableBuild() {
-		upf.BoolVar(&upArgs.runWebClient, "webclient", false, "run a web client, permitting access per tailnet admin's declared policy")
-	}
-
 	if safesocket.GOOSUsesPeerCreds(goos) {
 		upf.StringVar(&upArgs.opUser, "operator", "", "Unix username to allow to operate on tailscaled without sudo")
 	}
@@ -442,7 +437,7 @@ func runUp(ctx context.Context, cmd string, args []string, upArgs upArgsT) (retE
 		fatalf("%s", err)
 	}
 
-	if len(prefs.AdvertiseRoutes) > 0 {
+	if len(prefs.AdvertiseRoutes) > 0 || prefs.AppConnector.Advertise {
 		// TODO(jwhited): compress CheckIPForwarding and CheckUDPGROForwarding
 		//  into a single HTTP req.
 		if err := localClient.CheckIPForwarding(ctx); err != nil {

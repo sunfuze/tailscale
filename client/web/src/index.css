@@ -3,6 +3,18 @@
 @tailwind utilities;
 
 @layer base {
+  @font-face {
+    font-family: "Inter";
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+    src: url("./assets/fonts/Inter.var.latin.woff2") format("woff2-variations");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02C6, U+02DA, U+02DC,
+      U+02BB-02BC, U+2000-206F, U+2122, U+2190-2199, U+2212, U+2215, U+FEFF,
+      U+FFFD, U+E06B-E080, U+02E2, U+02E2, U+02B0, U+1D34, U+1D57, U+1D40,
+      U+207F, U+1D3A, U+1D48, U+1D30, U+02B3, U+1D3F;
+  }
+
   h1 {
     @apply text-neutral-800 text-[22px] font-medium leading-[30.80px];
   }
@@ -30,6 +42,149 @@
   }
   .card td:last-child {
     @apply text-neutral-800 text-sm leading-tight;
+  }
+
+  .description {
+    @apply text-neutral-500 leading-snug;
+  }
+
+  /**
+   * .toggle applies "Toggle" UI styles to input[type="checkbox"] form elements.
+   * You can use the -large and -small modifiers for size variants.
+   */
+  .toggle {
+    @apply appearance-none relative w-10 h-5 rounded-full bg-neutral-300 cursor-pointer;
+    transition: background-color 200ms ease-in-out;
+  }
+
+  .toggle:disabled {
+    @apply bg-neutral-200;
+    @apply cursor-not-allowed;
+  }
+
+  .toggle:checked {
+    @apply bg-indigo-500;
+  }
+
+  .toggle:checked:disabled {
+    @apply bg-indigo-300;
+  }
+
+  .toggle:focus {
+    @apply outline-none ring;
+  }
+
+  .toggle::after {
+    @apply absolute bg-white rounded-full will-change-[width];
+    @apply w-3.5 h-3.5 m-[0.1875rem] translate-x-0;
+    content: " ";
+    transition: width 200ms ease, transform 200ms ease;
+  }
+
+  .toggle:checked::after {
+    @apply translate-x-5;
+  }
+
+  .toggle:checked:disabled::after {
+    @apply bg-indigo-50;
+  }
+
+  .toggle:enabled:active::after {
+    @apply w-[1.125rem];
+  }
+
+  .toggle:checked:enabled:active::after {
+    @apply w-[1.125rem] translate-x-3.5;
+  }
+
+  .toggle-large {
+    @apply w-12 h-6;
+  }
+
+  .toggle-large::after {
+    @apply m-1 w-4 h-4;
+  }
+
+  .toggle-large:checked::after {
+    @apply translate-x-6;
+  }
+
+  .toggle-large:enabled:active::after {
+    @apply w-6;
+  }
+
+  .toggle-large:checked:enabled:active::after {
+    @apply w-6 translate-x-4;
+  }
+
+  .toggle-small {
+    @apply w-6 h-3;
+  }
+
+  .toggle-small:focus {
+    /**
+     * We disable ring for .toggle-small because it is a
+     * small, inline element.
+     */
+    @apply outline-none shadow-none;
+  }
+
+  .toggle-small::after {
+    @apply w-2 h-2 m-0.5;
+  }
+
+  .toggle-small:checked::after {
+    @apply translate-x-3;
+  }
+
+  .toggle-small:enabled:active::after {
+    @apply w-[0.675rem];
+  }
+
+  .toggle-small:checked:enabled:active::after {
+    @apply w-[0.675rem] translate-x-[0.55rem];
+  }
+
+  /**
+   * .input defines default text input field styling. These styles should
+   * correspond to .button, sharing a similar height and rounding, since .input
+   * and .button are commonly used together.
+   */
+
+  .input,
+  .input-wrapper {
+    @apply appearance-none leading-tight rounded-md bg-white border border-gray-300 hover:border-gray-400 transition-colors w-full h-input;
+  }
+
+  .input {
+    @apply px-3;
+  }
+
+  .input::placeholder,
+  .input-wrapper::placeholder {
+    @apply text-gray-400;
+  }
+
+  .input:disabled,
+  .input-wrapper:disabled {
+    @apply border-gray-300;
+    @apply bg-gray-0;
+    @apply cursor-not-allowed;
+  }
+
+  .input:focus,
+  .input-wrapper:focus-within {
+    @apply outline-none ring border-gray-400;
+  }
+
+  .input-error {
+    @apply border-red-200;
+  }
+}
+
+@layer utilities {
+  .h-input {
+    @apply h-[2.375rem];
   }
 }
 
@@ -158,4 +313,24 @@ html {
 .button-red:enabled:hover {
   background-color: #b22d30;
   border-color: #b22d30;
+}
+
+/**
+  * .spinner creates a circular animated spinner, most often used to indicate a
+  * loading state. The .spinner element must define a width, height, and
+  * border-width for the spinner to apply.
+  */
+
+@keyframes spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.spinner {
+  @apply border-transparent border-t-current border-l-current rounded-full;
+  animation: spin 700ms linear infinite;
 }

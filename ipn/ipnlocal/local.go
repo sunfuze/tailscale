@@ -341,7 +341,7 @@ func NewLocalBackend(logf logger.Logf, logID logid.PublicID, sys *tsd.System, lo
 			return nil, err
 		}
 		p.ApplyEdits(&mp)
-		if err := pm.SetPrefs(p.View(), ""); err != nil {
+		if err := pm.SetPrefs(p.View(), ipn.NetworkProfile{}); err != nil {
 			return nil, err
 		}
 	}
@@ -449,7 +449,7 @@ func (b *LocalBackend) SetComponentDebugLogging(component string, until time.Tim
 	var setEnabled func(bool)
 	switch component {
 	case "magicsock":
-		setEnabled = b.magicConn().SetDebugLoggingEnabled
+		setEnabled = b.MagicConn().SetDebugLoggingEnabled
 	case "sockstats":
 		if b.sockstatLogger != nil {
 			setEnabled = func(v bool) {
@@ -656,7 +656,7 @@ func (b *LocalBackend) Shutdown() {
 		b.debugSink = nil
 	}
 	b.mu.Unlock()
-	b.WebClientShutdown()
+	b.webClientShutdown()
 
 	if b.sockstatLogger != nil {
 		b.sockstatLogger.Shutdown()
@@ -1105,10 +1105,19 @@ func (b *LocalBackend) SetControlClientStatus(c controlclient.Client, st control
 		prefsChanged = true
 	}
 
+	// Until recently, we did not store the account's tailnet name. So check if this is the case,
+	// and backfill it on incoming status update.
+	if b.pm.requiresBackfill() && st.NetMap != nil && st.NetMap.Domain != "" {
+		prefsChanged = true
+	}
+
 	// Perform all mutations of prefs based on the netmap here.
 	if prefsChanged {
 		// Prefs will be written out if stale; this is not safe unless locked or cloned.
-		if err := b.pm.SetPrefs(prefs.View(), st.NetMap.MagicDNSSuffix()); err != nil {
+		if err := b.pm.SetPrefs(prefs.View(), ipn.NetworkProfile{
+			MagicDNSName: st.NetMap.MagicDNSSuffix(),
+			DomainName:   st.NetMap.DomainName(),
+		}); err != nil {
 			b.logf("Failed to save new controlclient state: %v", err)
 		}
 	}
@@ -1164,7 +1173,10 @@ func (b *LocalBackend) SetControlClientStatus(c controlclient.Client, st control
 			b.mu.Lock()
 			prefs.WantRunning = false
 			p := prefs.View()
-			if err := b.pm.SetPrefs(p, st.NetMap.MagicDNSSuffix()); err != nil {
+			if err := b.pm.SetPrefs(p, ipn.NetworkProfile{
+				MagicDNSName: st.NetMap.MagicDNSSuffix(),
+				DomainName:   st.NetMap.DomainName(),
+			}); err != nil {
 				b.logf("Failed to save new controlclient state: %v", err)
 			}
 			b.mu.Unlock()
@@ -1181,7 +1193,7 @@ func (b *LocalBackend) SetControlClientStatus(c controlclient.Client, st control
 		}
 
 		b.e.SetNetworkMap(st.NetMap)
-		b.magicConn().SetDERPMap(st.NetMap.DERPMap)
+		b.MagicConn().SetDERPMap(st.NetMap.DERPMap)
 
 		// Update our cached DERP map
 		dnsfallback.UpdateCache(st.NetMap.DERPMap, b.logf)
@@ -1204,7 +1216,7 @@ var _ controlclient.NetmapDeltaUpdater = (*LocalBackend)(nil)
 
 // UpdateNetmapDelta implements controlclient.NetmapDeltaUpdater.
 func (b *LocalBackend) UpdateNetmapDelta(muts []netmap.NodeMutation) (handled bool) {
-	if !b.magicConn().UpdateNetmapDelta(muts) {
+	if !b.MagicConn().UpdateNetmapDelta(muts) {
 		return false
 	}
 
@@ -1573,7 +1585,10 @@ func (b *LocalBackend) Start(opts ipn.Options) error {
 		newPrefs := opts.UpdatePrefs.Clone()
 		newPrefs.Persist = oldPrefs.Persist().AsStruct()
 		pv := newPrefs.View()
-		if err := b.pm.SetPrefs(pv, b.netMap.MagicDNSSuffix()); err != nil {
+		if err := b.pm.SetPrefs(pv, ipn.NetworkProfile{
+			MagicDNSName: b.netMap.MagicDNSSuffix(),
+			DomainName:   b.netMap.DomainName(),
+		}); err != nil {
 			b.logf("failed to save UpdatePrefs state: %v", err)
 		}
 		b.setAtomicValuesFromPrefsLocked(pv)
@@ -1624,7 +1639,7 @@ func (b *LocalBackend) Start(opts ipn.Options) error {
 		})
 	}
 
-	discoPublic := b.magicConn().DiscoPublicKey()
+	discoPublic := b.MagicConn().DiscoPublicKey()
 
 	var err error
 
@@ -1703,7 +1718,7 @@ func (b *LocalBackend) Start(opts ipn.Options) error {
 	}
 	cc.SetTKAHead(tkaHead)
 
-	b.magicConn().SetNetInfoCallback(b.setNetInfo)
+	b.MagicConn().SetNetInfoCallback(b.setNetInfo)
 
 	blid := b.backendLogID.String()
 	b.logf("Backend: logs: be:%v fe:%v", blid, opts.FrontendLogID)
@@ -2241,7 +2256,7 @@ func (b *LocalBackend) DebugForceNetmapUpdate() {
 	nm := b.netMap
 	b.e.SetNetworkMap(nm)
 	if nm != nil {
-		b.magicConn().SetDERPMap(nm.DERPMap)
+		b.MagicConn().SetDERPMap(nm.DERPMap)
 	}
 	b.setNetMapLocked(nm)
 }
@@ -2479,7 +2494,10 @@ func (b *LocalBackend) migrateStateLocked(prefs *ipn.Prefs) (err error) {
 		// Backend owns the state, but frontend is trying to migrate
 		// state into the backend.
 		b.logf("importing frontend prefs into backend store; frontend prefs: %s", prefs.Pretty())
-		if err := b.pm.SetPrefs(prefs.View(), b.netMap.MagicDNSSuffix()); err != nil {
+		if err := b.pm.SetPrefs(prefs.View(), ipn.NetworkProfile{
+			MagicDNSName: b.netMap.MagicDNSSuffix(),
+			DomainName:   b.netMap.DomainName(),
+		}); err != nil {
 			return fmt.Errorf("store.WriteState: %v", err)
 		}
 	}
@@ -3060,7 +3078,10 @@ func (b *LocalBackend) setPrefsLockedOnEntry(caller string, newp *ipn.Prefs) ipn
 	}
 
 	prefs := newp.View()
-	if err := b.pm.SetPrefs(prefs, b.netMap.MagicDNSSuffix()); err != nil {
+	if err := b.pm.SetPrefs(prefs, ipn.NetworkProfile{
+		MagicDNSName: b.netMap.MagicDNSSuffix(),
+		DomainName:   b.netMap.DomainName(),
+	}); err != nil {
 		b.logf("failed to save new controlclient state: %v", err)
 	}
 	b.lastProfileID = b.pm.CurrentProfile().ID
@@ -3071,7 +3092,7 @@ func (b *LocalBackend) setPrefsLockedOnEntry(caller string, newp *ipn.Prefs) ipn
 	}
 
 	if netMap != nil {
-		b.magicConn().SetDERPMap(netMap.DERPMap)
+		b.MagicConn().SetDERPMap(netMap.DERPMap)
 	}
 
 	if !oldp.WantRunning() && newp.WantRunning {
@@ -3292,16 +3313,18 @@ func (b *LocalBackend) reconfigAppConnectorLocked(nm *netmap.NetworkMap, prefs i
 		return
 	}
 
+	// Geometric cost, assumes that the number of advertised tags is small
+	selfHasTag := func(attrTags []string) bool {
+		return nm.SelfNode.Tags().ContainsFunc(func(tag string) bool {
+			return slices.Contains(attrTags, tag)
+		})
+	}
+
 	var domains []string
 	for _, attr := range attrs {
-		// Geometric cost, assumes that the number of advertised tags is small
-		if !nm.SelfNode.Tags().ContainsFunc(func(tag string) bool {
-			return slices.Contains(attr.Connectors, tag)
-		}) {
-			continue
+		if slices.Contains(attr.Connectors, "*") || selfHasTag(attr.Connectors) {
+			domains = append(domains, attr.Domains...)
 		}
-
-		domains = append(domains, attr.Domains...)
 	}
 	slices.Sort(domains)
 	slices.Compact(domains)
@@ -3728,6 +3751,7 @@ func (b *LocalBackend) initPeerAPIListener() {
 		taildrop: taildrop.ManagerOptions{
 			Logf:             b.logf,
 			Clock:            tstime.DefaultClock{Clock: b.clock},
+			State:            b.store,
 			Dir:              fileRoot,
 			DirectFileMode:   b.directFileRoot != "",
 			AvoidFinalRename: !b.directFileDoFinalRename,
@@ -3905,7 +3929,8 @@ func (b *LocalBackend) routerConfig(cfg *wgcfg.Config, prefs ipn.PrefsView, oneC
 		if err != nil {
 			b.logf("failed to discover interface ips: %v", err)
 		}
-		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		switch runtime.GOOS {
+		case "linux", "windows", "darwin", "ios":
 			rs.LocalRoutes = internalIPs // unconditionally allow access to guest VM networks
 			if prefs.ExitNodeAllowLANAccess() {
 				rs.LocalRoutes = append(rs.LocalRoutes, externalIPs...)
@@ -3915,6 +3940,10 @@ func (b *LocalBackend) routerConfig(cfg *wgcfg.Config, prefs ipn.PrefsView, oneC
 				rs.Routes = append(rs.Routes, externalIPs...)
 			}
 			b.logf("allowing exit node access to local IPs: %v", rs.LocalRoutes)
+		default:
+			if prefs.ExitNodeAllowLANAccess() {
+				b.logf("warning: ExitNodeAllowLANAccess has no effect on " + runtime.GOOS)
+			}
 		}
 	}
 
@@ -4243,10 +4272,10 @@ func (b *LocalBackend) ShouldRunSSH() bool { return b.sshAtomicBool.Load() && en
 func (b *LocalBackend) ShouldRunWebClient() bool { return b.webClientAtomicBool.Load() }
 
 func (b *LocalBackend) setWebClientAtomicBoolLocked(nm *netmap.NetworkMap, prefs ipn.PrefsView) {
-	shouldRun := prefs.Valid() && prefs.RunWebClient() && hasCapability(nm, tailcfg.CapabilityPreviewWebClient)
+	shouldRun := prefs.Valid() && prefs.RunWebClient()
 	wasRunning := b.webClientAtomicBool.Swap(shouldRun)
 	if wasRunning && !shouldRun {
-		go b.WebClientShutdown() // stop web client
+		go b.webClientShutdown() // stop web client
 	}
 }
 
@@ -4371,6 +4400,8 @@ func (b *LocalBackend) setNetMapLocked(nm *netmap.NetworkMap) {
 		osshare.SetFileSharingEnabled(fs, b.logf)
 	}
 	b.capFileSharing = fs
+
+	b.MagicConn().SetSilentDisco(b.ControlKnobs().SilentDisco.Load())
 
 	b.setDebugLogsByCapabilityLocked(nm)
 
@@ -5065,12 +5096,12 @@ func peerCanProxyDNS(p tailcfg.NodeView) bool {
 }
 
 func (b *LocalBackend) DebugRebind() error {
-	b.magicConn().Rebind()
+	b.MagicConn().Rebind()
 	return nil
 }
 
 func (b *LocalBackend) DebugReSTUN() error {
-	b.magicConn().ReSTUN("explicit-debug")
+	b.MagicConn().ReSTUN("explicit-debug")
 	return nil
 }
 
@@ -5079,7 +5110,8 @@ func (b *LocalBackend) ControlKnobs() *controlknobs.Knobs {
 	return b.sys.ControlKnobs()
 }
 
-func (b *LocalBackend) magicConn() *magicsock.Conn {
+// MagicConn returns the backend's *magicsock.Conn.
+func (b *LocalBackend) MagicConn() *magicsock.Conn {
 	return b.sys.MagicSock.Get()
 }
 
@@ -5524,7 +5556,7 @@ func (b *LocalBackend) GetPeerEndpointChanges(ctx context.Context, ip netip.Addr
 	}
 	peer := pip.Node
 
-	chs, err := b.magicConn().GetEndpointChanges(peer)
+	chs, err := b.MagicConn().GetEndpointChanges(peer)
 	if err != nil {
 		return nil, fmt.Errorf("getting endpoint changes: %w", err)
 	}
@@ -5541,7 +5573,7 @@ func (b *LocalBackend) DebugBreakTCPConns() error {
 }
 
 func (b *LocalBackend) DebugBreakDERPConns() error {
-	return b.magicConn().DebugBreakDERPConns()
+	return b.MagicConn().DebugBreakDERPConns()
 }
 
 func (b *LocalBackend) pushSelfUpdateProgress(up ipnstate.UpdateProgress) {

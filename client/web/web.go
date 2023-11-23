@@ -71,6 +71,13 @@ type Server struct {
 	// The map provides a lookup of the session by cookie value
 	// (browserSession.ID => browserSession).
 	browserSessions sync.Map
+
+	// newAuthURL creates a new auth URL that can be used to validate
+	// a browser session to manage this web client.
+	newAuthURL func(ctx context.Context, src tailcfg.NodeID) (*tailcfg.WebClientAuthResponse, error)
+	// waitWebClientAuthURL blocks until the associated auth URL has
+	// been completed by its user, or until ctx is canceled.
+	waitAuthURL func(ctx context.Context, id string, src tailcfg.NodeID) (*tailcfg.WebClientAuthResponse, error)
 }
 
 // ServerMode specifies the mode of a running web.Server.
@@ -92,10 +99,6 @@ const (
 	// the source's Tailscale identity. If the source browser does not have
 	// a valid session, a readonly version of the app is displayed.
 	ManageServerMode ServerMode = "manage"
-
-	// LegacyServerMode serves the legacy web client, visible to users
-	// prior to release of tailscale/corp#14335.
-	LegacyServerMode ServerMode = "legacy"
 )
 
 var (
@@ -125,6 +128,20 @@ type ServerOpts struct {
 	// Logf optionally provides a logger function.
 	// log.Printf is used as default.
 	Logf logger.Logf
+
+	// The following two fields are required and used exclusively
+	// in ManageServerMode to facilitate the control server login
+	// check step for authorizing browser sessions.
+
+	// NewAuthURL should be provided as a function that generates
+	// a new tailcfg.WebClientAuthResponse.
+	// This field is required for ManageServerMode mode.
+	NewAuthURL func(ctx context.Context, src tailcfg.NodeID) (*tailcfg.WebClientAuthResponse, error)
+	// WaitAuthURL should be provided as a function that blocks until
+	// the associated tailcfg.WebClientAuthResponse has been marked
+	// as completed.
+	// This field is required for ManageServerMode mode.
+	WaitAuthURL func(ctx context.Context, id string, src tailcfg.NodeID) (*tailcfg.WebClientAuthResponse, error)
 }
 
 // NewServer constructs a new Tailscale web client server.
@@ -133,7 +150,7 @@ type ServerOpts struct {
 // and not the lifespan of the web server.
 func NewServer(opts ServerOpts) (s *Server, err error) {
 	switch opts.Mode {
-	case LoginServerMode, ManageServerMode, LegacyServerMode:
+	case LoginServerMode, ManageServerMode:
 		// valid types
 	case "":
 		return nil, fmt.Errorf("must specify a Mode")
@@ -144,13 +161,23 @@ func NewServer(opts ServerOpts) (s *Server, err error) {
 		opts.LocalClient = &tailscale.LocalClient{}
 	}
 	s = &Server{
-		mode:       opts.Mode,
-		logf:       opts.Logf,
-		devMode:    envknob.Bool("TS_DEBUG_WEB_CLIENT_DEV"),
-		lc:         opts.LocalClient,
-		cgiMode:    opts.CGIMode,
-		pathPrefix: opts.PathPrefix,
-		timeNow:    opts.TimeNow,
+		mode:        opts.Mode,
+		logf:        opts.Logf,
+		devMode:     envknob.Bool("TS_DEBUG_WEB_CLIENT_DEV"),
+		lc:          opts.LocalClient,
+		cgiMode:     opts.CGIMode,
+		pathPrefix:  opts.PathPrefix,
+		timeNow:     opts.TimeNow,
+		newAuthURL:  opts.NewAuthURL,
+		waitAuthURL: opts.WaitAuthURL,
+	}
+	if s.mode == ManageServerMode {
+		if opts.NewAuthURL == nil {
+			return nil, fmt.Errorf("must provide a NewAuthURL implementation")
+		}
+		if opts.WaitAuthURL == nil {
+			return nil, fmt.Errorf("must provide WaitAuthURL implementation")
+		}
 	}
 	if s.timeNow == nil {
 		s.timeNow = time.Now
@@ -329,11 +356,11 @@ func (s *Server) authorizeRequest(w http.ResponseWriter, r *http.Request) (ok bo
 	// Client using system-specific auth.
 	switch distro.Get() {
 	case distro.Synology:
-		resp, _ := authorizeSynology(r)
-		return resp.OK
+		authorized, _ := authorizeSynology(r)
+		return authorized
 	case distro.QNAP:
-		resp, _ := authorizeQNAP(r)
-		return resp.OK
+		authorized, _ := authorizeQNAP(r)
+		return authorized
 	default:
 		return true // no additional auth for this distro
 	}
@@ -344,18 +371,14 @@ func (s *Server) authorizeRequest(w http.ResponseWriter, r *http.Request) (ok bo
 // which protects the handler using gorilla csrf.
 func (s *Server) serveLoginAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-CSRF-Token", csrf.Token(r))
-	if r.URL.Path != "/api/data" { // only endpoint allowed for login client
-		http.Error(w, "invalid endpoint", http.StatusNotFound)
-		return
-	}
-	switch r.Method {
-	case httpm.GET:
-		// TODO(soniaappasamy): we may want a minimal node data response here
+	switch {
+	case r.URL.Path == "/api/data" && r.Method == httpm.GET:
 		s.serveGetNodeData(w, r)
-		return
+	case r.URL.Path == "/api/up" && r.Method == httpm.POST:
+		s.serveTailscaleUp(w, r)
+	default:
+		http.Error(w, "invalid endpoint or method", http.StatusNotFound)
 	}
-	http.Error(w, "invalid endpoint", http.StatusNotFound)
-	return
 }
 
 type authType string
@@ -366,8 +389,18 @@ var (
 )
 
 type authResponse struct {
-	OK         bool     `json:"ok"`                   // true when user has valid auth session
-	AuthNeeded authType `json:"authNeeded,omitempty"` // filled when user needs to complete a specific type of auth
+	AuthNeeded     authType        `json:"authNeeded,omitempty"` // filled when user needs to complete a specific type of auth
+	CanManageNode  bool            `json:"canManageNode"`
+	ViewerIdentity *viewerIdentity `json:"viewerIdentity,omitempty"`
+}
+
+// viewerIdentity is the Tailscale identity of the source node
+// connected to this web client.
+type viewerIdentity struct {
+	LoginName     string `json:"loginName"`
+	NodeName      string `json:"nodeName"`
+	NodeIP        string `json:"nodeIP"`
+	ProfilePicURL string `json:"profilePicUrl,omitempty"`
 }
 
 // serverAPIAuth handles requests to the /api/auth endpoint
@@ -375,25 +408,27 @@ type authResponse struct {
 func (s *Server) serveAPIAuth(w http.ResponseWriter, r *http.Request) {
 	var resp authResponse
 
-	session, _, err := s.getSession(r)
+	session, whois, err := s.getSession(r)
 	switch {
 	case err != nil && errors.Is(err, errNotUsingTailscale):
 		// not using tailscale, so perform platform auth
 		switch distro.Get() {
 		case distro.Synology:
-			resp, err = authorizeSynology(r)
+			authorized, err := authorizeSynology(r)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusUnauthorized)
 				return
 			}
+			if !authorized {
+				resp.AuthNeeded = synoAuth
+			}
 		case distro.QNAP:
-			resp, err = authorizeQNAP(r)
-			if err != nil {
+			if _, err := authorizeQNAP(r); err != nil {
 				http.Error(w, err.Error(), http.StatusUnauthorized)
 				return
 			}
 		default:
-			resp.OK = true // no additional auth for this distro
+			// no additional auth for this distro
 		}
 	case err != nil && (errors.Is(err, errNotOwner) ||
 		errors.Is(err, errNotUsingTailscale) ||
@@ -401,17 +436,28 @@ func (s *Server) serveAPIAuth(w http.ResponseWriter, r *http.Request) {
 		errors.Is(err, errTaggedRemoteSource)):
 		// These cases are all restricted to the readonly view.
 		// No auth action to take.
-		resp = authResponse{OK: false}
+		resp.AuthNeeded = ""
 	case err != nil && !errors.Is(err, errNoSession):
 		// Any other error.
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	case session.isAuthorized(s.timeNow()):
-		resp = authResponse{OK: true}
+		resp.CanManageNode = true
+		resp.AuthNeeded = ""
 	default:
-		resp = authResponse{OK: false, AuthNeeded: tailscaleAuth}
+		resp.AuthNeeded = tailscaleAuth
 	}
 
+	if whois != nil {
+		resp.ViewerIdentity = &viewerIdentity{
+			LoginName:     whois.UserProfile.LoginName,
+			NodeName:      whois.Node.Name,
+			ProfilePicURL: whois.UserProfile.ProfilePicURL,
+		}
+		if addrs := whois.Node.Addresses; len(addrs) > 0 {
+			resp.ViewerIdentity.NodeIP = addrs[0].Addr().String()
+		}
+	}
 	writeJSON(w, resp)
 }
 
@@ -482,6 +528,9 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 		return
+	case path == "/exit-nodes" && r.Method == httpm.GET:
+		s.serveGetExitNodes(w, r)
+		return
 	case strings.HasPrefix(path, "/local/"):
 		s.proxyRequestToLocalAPI(w, r)
 		return
@@ -494,6 +543,7 @@ type nodeData struct {
 	Status      string
 	DeviceName  string
 	TailnetName string // TLS cert name
+	DomainName  string
 	IP          string // IPv4
 	IPv6        string
 	OS          string
@@ -513,12 +563,14 @@ type nodeData struct {
 	UnraidToken string
 	URLPrefix   string // if set, the URL prefix the client is served behind
 
+	ExitNodeStatus    *exitNodeWithStatus
 	AdvertiseExitNode bool
 	AdvertiseRoutes   string
+	RunningSSHServer  bool
+
+	ClientVersion *tailcfg.ClientVersion
 
 	LicensesURL string
-
-	DebugMode string // empty when not running in any debug mode
 }
 
 func (s *Server) serveGetNodeData(w http.ResponseWriter, r *http.Request) {
@@ -532,30 +584,29 @@ func (s *Server) serveGetNodeData(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	var debugMode string
-	if s.mode == ManageServerMode {
-		debugMode = "full"
-	} else if s.mode == LoginServerMode {
-		debugMode = "login"
-	}
 	data := &nodeData{
-		ID:          st.Self.ID,
-		Status:      st.BackendState,
-		DeviceName:  strings.Split(st.Self.DNSName, ".")[0],
-		TailnetName: st.CurrentTailnet.MagicDNSSuffix,
-		OS:          st.Self.OS,
-		IPNVersion:  strings.Split(st.Version, "-")[0],
-		Profile:     st.User[st.Self.UserID],
-		IsTagged:    st.Self.IsTagged(),
-		KeyExpired:  st.Self.Expired,
-		TUNMode:     st.TUN,
-		IsSynology:  distro.Get() == distro.Synology || envknob.Bool("TS_FAKE_SYNOLOGY"),
-		DSMVersion:  distro.DSMVersion(),
-		IsUnraid:    distro.Get() == distro.Unraid,
-		UnraidToken: os.Getenv("UNRAID_CSRF_TOKEN"),
-		URLPrefix:   strings.TrimSuffix(s.pathPrefix, "/"),
-		LicensesURL: licenses.LicensesURL(),
-		DebugMode:   debugMode, // TODO(sonia,will): just pass back s.mode directly?
+		ID:               st.Self.ID,
+		Status:           st.BackendState,
+		DeviceName:       strings.Split(st.Self.DNSName, ".")[0],
+		OS:               st.Self.OS,
+		IPNVersion:       strings.Split(st.Version, "-")[0],
+		Profile:          st.User[st.Self.UserID],
+		IsTagged:         st.Self.IsTagged(),
+		KeyExpired:       st.Self.Expired,
+		TUNMode:          st.TUN,
+		IsSynology:       distro.Get() == distro.Synology || envknob.Bool("TS_FAKE_SYNOLOGY"),
+		DSMVersion:       distro.DSMVersion(),
+		IsUnraid:         distro.Get() == distro.Unraid,
+		UnraidToken:      os.Getenv("UNRAID_CSRF_TOKEN"),
+		RunningSSHServer: prefs.RunSSH,
+		URLPrefix:        strings.TrimSuffix(s.pathPrefix, "/"),
+		LicensesURL:      licenses.LicensesURL(),
+	}
+	cv, err := s.lc.CheckUpdate(r.Context())
+	if err != nil {
+		s.logf("could not check for updates: %v", err)
+	} else {
+		data.ClientVersion = cv
 	}
 	for _, ip := range st.TailscaleIPs {
 		if ip.Is4() {
@@ -566,6 +617,10 @@ func (s *Server) serveGetNodeData(w http.ResponseWriter, r *http.Request) {
 		if data.IP != "" && data.IPv6 != "" {
 			break
 		}
+	}
+	if st.CurrentTailnet != nil {
+		data.TailnetName = st.CurrentTailnet.MagicDNSSuffix
+		data.DomainName = st.CurrentTailnet.Name
 	}
 	if st.Self.Tags != nil {
 		data.Tags = st.Self.Tags.AsSlice()
@@ -583,24 +638,69 @@ func (s *Server) serveGetNodeData(w http.ResponseWriter, r *http.Request) {
 			data.AdvertiseRoutes += r.String()
 		}
 	}
+	if e := st.ExitNodeStatus; e != nil {
+		data.ExitNodeStatus = &exitNodeWithStatus{
+			exitNode: exitNode{ID: e.ID},
+			Online:   e.Online,
+		}
+		for _, ps := range st.Peer {
+			if ps.ID == e.ID {
+				data.ExitNodeStatus.Name = ps.DNSName
+				data.ExitNodeStatus.Location = ps.Location
+				break
+			}
+		}
+		if data.ExitNodeStatus.Name == "" {
+			// Falling back to TailscaleIP/StableNodeID when the peer
+			// is no longer included in status.
+			if len(e.TailscaleIPs) > 0 {
+				data.ExitNodeStatus.Name = e.TailscaleIPs[0].Addr().String()
+			} else {
+				data.ExitNodeStatus.Name = string(e.ID)
+			}
+		}
+	}
 	writeJSON(w, *data)
 }
 
-type nodeUpdate struct {
-	AdvertiseRoutes   string
-	AdvertiseExitNode bool
-	Reauthenticate    bool
-	ForceLogout       bool
+type exitNode struct {
+	ID       tailcfg.StableNodeID
+	Name     string
+	Location *tailcfg.Location
 }
 
-func (s *Server) servePostNodeUpdate(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
+type exitNodeWithStatus struct {
+	exitNode
+	Online bool
+}
 
+func (s *Server) serveGetExitNodes(w http.ResponseWriter, r *http.Request) {
 	st, err := s.lc.Status(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	var exitNodes []*exitNode
+	for _, ps := range st.Peer {
+		if !ps.ExitNodeOption {
+			continue
+		}
+		exitNodes = append(exitNodes, &exitNode{
+			ID:       ps.ID,
+			Name:     ps.DNSName,
+			Location: ps.Location,
+		})
+	}
+	writeJSON(w, exitNodes)
+}
+
+type nodeUpdate struct {
+	AdvertiseRoutes   string
+	AdvertiseExitNode bool
+}
+
+func (s *Server) servePostNodeUpdate(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
 
 	var postData nodeUpdate
 	type mi map[string]any
@@ -647,46 +747,30 @@ func (s *Server) servePostNodeUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	var reauth, logout bool
-	if postData.Reauthenticate {
-		reauth = true
-	}
-	if postData.ForceLogout {
-		logout = true
-	}
-	s.logf("tailscaleUp(reauth=%v, logout=%v) ...", reauth, logout)
-	url, err := s.tailscaleUp(r.Context(), st, postData)
-	s.logf("tailscaleUp = (URL %v, %v)", url != "", err)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(mi{"error": err.Error()})
-		return
-	}
-	if url != "" {
-		json.NewEncoder(w).Encode(mi{"url": url})
-	} else {
-		io.WriteString(w, "{}")
-	}
+	io.WriteString(w, "{}")
 }
 
-func (s *Server) tailscaleUp(ctx context.Context, st *ipnstate.Status, postData nodeUpdate) (authURL string, retErr error) {
-	if postData.ForceLogout {
-		if err := s.lc.Logout(ctx); err != nil {
-			return "", fmt.Errorf("Logout error: %w", err)
-		}
-		return "", nil
-	}
-
+// tailscaleUp starts the daemon with the provided options.
+// If reauthentication has been requested, an authURL is returned to complete device registration.
+func (s *Server) tailscaleUp(ctx context.Context, st *ipnstate.Status, opt tailscaleUpOptions) (authURL string, retErr error) {
 	origAuthURL := st.AuthURL
 	isRunning := st.BackendState == ipn.Running.String()
 
-	forceReauth := postData.Reauthenticate
-	if !forceReauth {
-		if origAuthURL != "" {
+	if !opt.Reauthenticate {
+		switch {
+		case origAuthURL != "":
 			return origAuthURL, nil
-		}
-		if isRunning {
+		case isRunning:
 			return "", nil
+		case st.BackendState == ipn.Stopped.String():
+			// stopped and not reauthenticating, so just start running
+			_, err := s.lc.EditPrefs(ctx, &ipn.MaskedPrefs{
+				Prefs: ipn.Prefs{
+					WantRunning: true,
+				},
+				WantRunningSet: true,
+			})
+			return "", err
 		}
 	}
 
@@ -706,10 +790,18 @@ func (s *Server) tailscaleUp(ctx context.Context, st *ipnstate.Status, postData 
 
 	go func() {
 		if !isRunning {
-			s.lc.Start(ctx, ipn.Options{})
+			ipnOptions := ipn.Options{AuthKey: opt.AuthKey}
+			if opt.ControlURL != "" {
+				ipnOptions.UpdatePrefs = &ipn.Prefs{ControlURL: opt.ControlURL}
+			}
+			if err := s.lc.Start(ctx, ipnOptions); err != nil {
+				s.logf("start: %v", err)
+			}
 		}
-		if forceReauth {
-			s.lc.StartLoginInteractive(ctx)
+		if opt.Reauthenticate {
+			if err := s.lc.StartLoginInteractive(ctx); err != nil {
+				s.logf("startLogin: %v", err)
+			}
 		}
 	}()
 
@@ -718,6 +810,9 @@ func (s *Server) tailscaleUp(ctx context.Context, st *ipnstate.Status, postData 
 		if err != nil {
 			return "", err
 		}
+		if n.State != nil && *n.State == ipn.Running {
+			return "", nil
+		}
 		if n.ErrMessage != nil {
 			msg := *n.ErrMessage
 			return "", fmt.Errorf("backend error: %v", msg)
@@ -725,6 +820,50 @@ func (s *Server) tailscaleUp(ctx context.Context, st *ipnstate.Status, postData 
 		if url := n.BrowseToURL; url != nil && printAuthURL(*url) {
 			return *url, nil
 		}
+	}
+}
+
+type tailscaleUpOptions struct {
+	// If true, force reauthentication of the client.
+	// Otherwise simply reconnect, the same as running `tailscale up`.
+	Reauthenticate bool
+
+	ControlURL string
+	AuthKey    string
+}
+
+// serveTailscaleUp serves requests to /api/up.
+// If the user needs to authenticate, an authURL is provided in the response.
+func (s *Server) serveTailscaleUp(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	st, err := s.lc.Status(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var opt tailscaleUpOptions
+	type mi map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&opt); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(mi{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	s.logf("tailscaleUp(reauth=%v) ...", opt.Reauthenticate)
+	url, err := s.tailscaleUp(r.Context(), st, opt)
+	s.logf("tailscaleUp = (URL %v, %v)", url != "", err)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(mi{"error": err.Error()})
+		return
+	}
+	if url != "" {
+		json.NewEncoder(w).Encode(mi{"url": url})
+	} else {
+		io.WriteString(w, "{}")
 	}
 }
 
@@ -775,12 +914,12 @@ func (s *Server) proxyRequestToLocalAPI(w http.ResponseWriter, r *http.Request) 
 // Rather than exposing all localapi endpoints over the proxy,
 // this limits to just the ones actually used from the web
 // client frontend.
-//
-// TODO(sonia,will): Shouldn't expand this beyond the existing
-// localapi endpoints until the larger web client auth story
-// is worked out (tailscale/corp#14335).
 var localapiAllowlist = []string{
 	"/v0/logout",
+	"/v0/prefs",
+	"/v0/update/check",
+	"/v0/update/install",
+	"/v0/update/progress",
 }
 
 // csrfKey returns a key that can be used for CSRF protection.

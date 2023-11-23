@@ -139,6 +139,8 @@ type Conn struct {
 	// logging.
 	noV4, noV6 atomic.Bool
 
+	silentDiscoOn atomic.Bool // whether silent disco is enabled
+
 	// noV4Send is whether IPv4 UDP is known to be unable to transmit
 	// at all. This could happen if the socket is in an invalid state
 	// (as can happen on darwin after a network link status change).
@@ -268,6 +270,7 @@ type Conn struct {
 	privateKey       key.NodePrivate               // WireGuard private key for this node
 	everHadKey       bool                          // whether we ever had a non-zero private key
 	myDerp           int                           // nearest DERP region ID; 0 means none/unknown
+	homeless         bool                          // if true, don't try to find & stay conneted to a DERP home (myDerp will stay 0)
 	derpStarted      chan struct{}                 // closed on first connection to DERP; for tests & cleaner Close
 	activeDerp       map[int]activeDerp            // DERP regionID -> connection to a node in that region
 	prevDerp         map[int]*syncs.WaitGroupChan
@@ -1511,7 +1514,7 @@ func (c *Conn) handlePingLocked(dm *disco.Ping, src netip.AddrPort, di *discoInf
 	// mappings to make p2p path discovery faster in simple
 	// cases. Without this, disco would still work, but would be
 	// reliant on DERP call-me-maybe to establish the disco<>node
-	// mapping, and on subsequent disco handlePongLocked to establish
+	// mapping, and on subsequent disco handlePongConnLocked to establish
 	// the IP<>disco mapping.
 	if nk, ok := c.unambiguousNodeKeyOfPingLocked(dm, di.discoKey, derpNodeSrc); ok {
 		if !isDerp {
@@ -1797,8 +1800,29 @@ type debugFlags struct {
 }
 
 func (c *Conn) debugFlagsLocked() (f debugFlags) {
-	f.heartbeatDisabled = debugEnableSilentDisco() // TODO(bradfitz): controlknobs too, later
+	f.heartbeatDisabled = debugEnableSilentDisco() || c.silentDiscoOn.Load()
 	return
+}
+
+// SetSilentDisco toggles silent disco based on v.
+func (c *Conn) SetSilentDisco(v bool) {
+	old := c.silentDiscoOn.Swap(v)
+	if old == v {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.peerMap.forEachEndpoint(func(ep *endpoint) {
+		ep.setHeartbeatDisabled(v)
+	})
+}
+
+// SilentDisco returns true if silent disco is enabled, otherwise false.
+func (c *Conn) SilentDisco() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	flags := c.debugFlagsLocked()
+	return flags.heartbeatDisabled
 }
 
 // SetNetworkMap is called when the control client gets a new network
@@ -2179,7 +2203,7 @@ func (c *Conn) goroutinesRunningLocked() bool {
 }
 
 func (c *Conn) shouldDoPeriodicReSTUNLocked() bool {
-	if c.networkDown() {
+	if c.networkDown() || c.homeless {
 		return false
 	}
 	if len(c.peerSet) == 0 || c.privateKey.IsZero() {
@@ -2661,6 +2685,24 @@ func (c *Conn) UpdateStatus(sb *ipnstate.StatusBuilder) {
 // Nil may be specified to disable statistics gathering.
 func (c *Conn) SetStatistics(stats *connstats.Statistics) {
 	c.stats.Store(stats)
+}
+
+// SetHomeless sets whether magicsock should idle harder and not have a DERP
+// home connection active and not search for its nearest DERP home. In this
+// homeless mode, the node is unreachable by others.
+func (c *Conn) SetHomeless(v bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.homeless = v
+
+	if v && c.myDerp != 0 {
+		oldHome := c.myDerp
+		c.myDerp = 0
+		c.closeDerpLocked(oldHome, "set-homeless")
+	}
+	if !v {
+		go c.updateEndpoints("set-homeless-disabled")
+	}
 }
 
 const (

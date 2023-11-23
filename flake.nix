@@ -44,7 +44,7 @@
     # tailscaleRev is the git commit at which this flake was imported,
     # or the empty string when building from a local checkout of the
     # tailscale repo.
-    tailscaleRev = if builtins.hasAttr "rev" self then self.rev else "";
+    tailscaleRev = self.rev or "";
     # tailscale takes a nixpkgs package set, and builds Tailscale from
     # the same commit as this flake. IOW, it provides "tailscale built
     # from HEAD", where HEAD is "whatever commit you imported the
@@ -68,7 +68,7 @@
       src = ./.;
       vendorSha256 = pkgs.lib.fileContents ./go.mod.sri;
       nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.makeWrapper ];
-      ldflags = ["-X tailscale.com/version.GitCommit=${tailscaleRev}"];
+      ldflags = ["-X tailscale.com/version.gitCommitStamp=${tailscaleRev}"];
       CGO_ENABLED = 0;
       subPackages = [ "cmd/tailscale" "cmd/tailscaled" ];
       doCheck = false;
@@ -120,4 +120,4 @@
   in
     flake-utils.lib.eachDefaultSystem (system: flakeForSystem nixpkgs system);
 }
-# nix-direnv cache busting line: sha256-ynBPVRKWPcoEbbZ/atvO6VdjHVwhnWcugSD3RGJA34E=
+# nix-direnv cache busting line: sha256-J81eU0mtO3sIcT9OClnuMP+oybGUfysZtIJUvg41U1E=

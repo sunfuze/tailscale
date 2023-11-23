@@ -17,7 +17,9 @@ require (
 	github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/creack/pty v1.1.18
+	github.com/dave/courtney v0.4.0
 	github.com/dave/jennifer v1.7.0
+	github.com/dave/patsy v0.0.0-20210517141501-957256f50cba
 	github.com/dblohm7/wingoes v0.0.0-20230929194252-e994401fc077
 	github.com/digitalocean/go-smbios v0.0.0-20180907143718-390a4f403a8e
 	github.com/dsnet/try v0.0.3
@@ -66,8 +68,8 @@ require (
 	github.com/tailscale/hujson v0.0.0-20221223112325-20486734a56a
 	github.com/tailscale/mkctr v0.0.0-20220601142259-c0b937af2e89
 	github.com/tailscale/netlink v1.1.1-0.20211101221916-cabfb018fe85
-	github.com/tailscale/web-client-prebuilt v0.0.0-20231107191425-777c9efc9f36
-	github.com/tailscale/wireguard-go v0.0.0-20231101022006-db7604d1aa90
+	github.com/tailscale/web-client-prebuilt v0.0.0-20231118024040-94653e885f8e
+	github.com/tailscale/wireguard-go v0.0.0-20231121184858-cc193a0b3272
 	github.com/tc-hib/winres v0.2.1
 	github.com/tcnksm/go-httpstat v0.2.0
 	github.com/toqueteos/webbrowser v1.2.0
@@ -77,25 +79,27 @@ require (
 	go.uber.org/zap v1.26.0
 	go4.org/mem v0.0.0-20220726221520-4f986261bf13
 	go4.org/netipx v0.0.0-20230824141953-6213f710f925
-	golang.org/x/crypto v0.14.0
+	golang.org/x/crypto v0.15.0
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9
-	golang.org/x/mod v0.12.0
-	golang.org/x/net v0.17.0
+	golang.org/x/mod v0.14.0
+	golang.org/x/net v0.18.0
 	golang.org/x/oauth2 v0.12.0
-	golang.org/x/sync v0.3.0
-	golang.org/x/sys v0.13.0
-	golang.org/x/term v0.13.0
+	golang.org/x/sync v0.5.0
+	golang.org/x/sys v0.14.0
+	golang.org/x/term v0.14.0
 	golang.org/x/time v0.3.0
-	golang.org/x/tools v0.13.0
+	golang.org/x/tools v0.15.0
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
 	golang.zx2c4.com/wireguard/windows v0.5.3
+	gopkg.in/square/go-jose.v2 v2.6.0
 	gvisor.dev/gvisor v0.0.0-20230928000133-4fe30062272c
 	honnef.co/go/tools v0.4.6
 	inet.af/peercred v0.0.0-20210906144145-0893ea02156a
-	inet.af/tcpproxy v0.0.0-20221017015627-91f861402626
+	inet.af/tcpproxy v0.0.0-20231102063150-2862066fc2a9
 	inet.af/wf v0.0.0-20221017222439-36129f591884
 	k8s.io/api v0.28.2
 	k8s.io/apimachinery v0.28.2
+	k8s.io/apiserver v0.28.2
 	k8s.io/client-go v0.28.2
 	nhooyr.io/websocket v1.8.7
 	sigs.k8s.io/controller-runtime v0.16.2
@@ -105,6 +109,8 @@ require (
 
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
+	github.com/dave/astrid v0.0.0-20170323122508-8c2895878b14 // indirect
+	github.com/dave/brenda v1.1.0 // indirect
 	github.com/google/gnostic-models v0.6.9-0.20230804172637-c7be7c783f49 // indirect
 	github.com/gorilla/securecookie v1.1.1 // indirect
 )
@@ -344,7 +350,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20230905200255-921286631fa9 // indirect
 	golang.org/x/image v0.12.0 // indirect
-	golang.org/x/text v0.13.0 // indirect
+	golang.org/x/text v0.14.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/protobuf v1.31.0 // indirect

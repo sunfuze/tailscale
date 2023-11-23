@@ -7,8 +7,14 @@ export enum AuthType {
 }
 
 export type AuthResponse = {
-  ok: boolean
   authNeeded?: AuthType
+  canManageNode: boolean
+  viewerIdentity?: {
+    loginName: string
+    nodeName: string
+    nodeIP: string
+    profilePicUrl?: string
+  }
 }
 
 // useAuth reports and refreshes Tailscale auth status
@@ -35,6 +41,7 @@ export default function useAuth() {
           default:
             setLoading(false)
         }
+        return d
       })
       .catch((error) => {
         setLoading(false)
@@ -58,10 +65,14 @@ export default function useAuth() {
   }, [])
 
   useEffect(() => {
-    loadAuth()
-    if (new URLSearchParams(window.location.search).get("check") == "now") {
-      newSession()
-    }
+    loadAuth().then((d) => {
+      if (
+        !d.canManageNode &&
+        new URLSearchParams(window.location.search).get("check") == "now"
+      ) {
+        newSession()
+      }
+    })
   }, [])
 
   return {
